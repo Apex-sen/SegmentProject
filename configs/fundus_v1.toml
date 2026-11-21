@@ -1,0 +1,52 @@
+# Paths are relative to this configuration file.
+data_root = "../data/FundData"
+run_dir = "../runs/fundus_v1"
+source = "ORIGA"
+targets = ["PAPILA", "GAMMA"]
+seed = 42
+image_size = 512
+
+[experiment]
+device = "auto"
+methods = ["source_only", "tent_continual"]
+
+[train]
+validation_fraction = 0.20
+batch_size = 4
+epochs = 50
+learning_rate = 0.0003
+weight_decay = 0.0001
+imagenet_weights = false
+
+[sampling]
+# Zero uses every image in the split or target domain.
+max_train_samples = 0
+max_val_samples = 0
+max_target_samples = 0
+
+[smoke]
+max_train_samples = 8
+max_val_samples = 4
+max_target_samples = 4
+
+[report]
+save_per_image = false
+
+[methods.tent_continual]
+learning_rate = 0.0001
+momentum = 0.9
+
+[domains.ORIGA]
+images = "ORIGA/Images"
+masks = "ORIGA/Masks"
+mask_values = [0, 1, 2]
+
+[domains.PAPILA]
+images = "PAPILA/FundusImages"
+masks = "PAPILA/mask_exp1"
+mask_values = [255, 128, 0]
+
+[domains.GAMMA]
+images = "GAMMA/data/train"
+masks = "GAMMA/mask_DC/train"
+mask_values = [255, 128, 0]
