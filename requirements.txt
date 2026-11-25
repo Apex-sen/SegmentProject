@@ -1,5 +1,6 @@
 numpy
 Pillow
+scipy
 torch>=2.4
 torchvision>=0.19
 tomli; python_version < "3.11"

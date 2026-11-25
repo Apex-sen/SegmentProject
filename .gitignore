@@ -1,4 +1,38 @@
-__pycache__/
-/.venv-ctta/
+# Local experiment inputs and outputs
+/configs/
 /data/
 /runs/
+/results/
+/outputs/
+/checkpoints/
+/tmp/
+/temp/
+
+# Artifacts that can also be written under a custom output directory
+previews/
+image_visualizations/
+mask_visualizations/
+manifest.csv
+per_image.csv
+source_training.csv
+source_test.csv
+source_test_per_image.csv
+summary.csv
+rotation_summary.csv
+rotation_domains.csv
+rotation_source_test.csv
+verification.json
+verification_reference.json
+processing_log.csv
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.log
+*.tmp
+
+# Local Python environment and caches
+/.venv-ctta/
+__pycache__/
+*.py[cod]
+.pytest_cache/

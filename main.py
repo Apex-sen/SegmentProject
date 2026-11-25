@@ -9,16 +9,17 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "fundus_v1.toml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "fundus_v2.toml"
 SMOKE_LIMITS = {
     "max_train_samples": 8,
     "max_val_samples": 4,
+    "max_test_samples": 4,
     "max_target_samples": 4,
 }
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Train and evaluate fundus segmentation baselines.")
+    parser = argparse.ArgumentParser(description="Train and evaluate medical segmentation baselines.")
     parser.add_argument("command", nargs="?", default="run",
                         choices=("run", "prepare", "train", "evaluate", "verify-reference"),
                         help="Stage to run. Defaults to data preparation, training, and evaluation.")
@@ -31,9 +32,11 @@ def parse_args(argv=None):
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), help="Override experiment.device.")
     parser.add_argument("--gpu", type=int, help="CUDA device index when using CUDA.")
     parser.add_argument("--data_root", "--data-root", dest="data_root", type=Path,
-                        help="Root of the fundus datasets.")
+                        help="Root of the datasets for this experiment.")
     parser.add_argument("--save_dir", "--save-dir", dest="save_dir", type=Path,
                         help="Directory for the manifest, checkpoint, and results.")
+    parser.add_argument("--checkpoint", type=Path,
+                        help="Existing source checkpoint for evaluate; defaults to source_best.pt in the run directory.")
     parser.add_argument("--source", help="Source domain name from the TOML domains table.")
     parser.add_argument("--targets", nargs="+", help="Target domain names in stream order.")
     parser.add_argument("--smoke", action="store_true", help="Run on a small subset in the smoke output directory.")
@@ -41,8 +44,12 @@ def parse_args(argv=None):
                         help="Limit source training images in the manifest. Zero uses all.")
     parser.add_argument("--max_val_samples", "--max-val-samples", type=int,
                         help="Limit source validation images in the manifest. Zero uses all.")
+    parser.add_argument("--max_test_samples", "--max-test-samples", type=int,
+                        help="Limit source holdout test images in the manifest. Zero uses all.")
     parser.add_argument("--max_target_samples", "--max-target-samples", type=int,
                         help="Limit test images per target domain in the manifest. Zero uses all.")
+    parser.add_argument("--eval-split", choices=("all", "source-test", "target"),
+                        help="Evaluate both available splits, exclusively the source holdout, or the target stream.")
     parser.add_argument("--save_per_image", "--save-per-image", action=argparse.BooleanOptionalAction,
                         help="Write detailed per-image scores as a separate CSV.")
     parser.add_argument("--reference", type=Path, help="Official TENT file for verify-reference.")
@@ -57,10 +64,14 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.command == "verify-reference" and args.reference is None:
         parser.error("verify-reference requires --reference.")
+    if args.checkpoint is not None and args.command != "evaluate":
+        parser.error("--checkpoint is only supported by evaluate.")
     if args.gpu is not None and args.gpu < 0:
         parser.error("--gpu must be a non-negative device index.")
     if args.command not in ("run", "prepare") and any(getattr(args, key) is not None for key in SMOKE_LIMITS):
         parser.error("Pass sample limits to run or prepare, which create the manifest.")
+    if args.eval_split is not None and args.command not in ("run", "evaluate"):
+        parser.error("--eval-split is only supported by run and evaluate.")
     return args
 
 
@@ -68,6 +79,17 @@ def load_config(path):
     path = path.resolve()
     with path.open("rb") as stream:
         config = tomllib.load(stream)
+    base_name = config.pop("extends", None)
+    if base_name is not None:
+        base_path = path.parent / base_name
+        with base_path.open("rb") as stream:
+            base = tomllib.load(stream)
+        if "extends" in base:
+            raise ValueError(f"Only one level of configuration inheritance is supported: {base_path}")
+        for option in ("data_root", "run_dir"):
+            if option in base:
+                base[option] = (base_path.parent / base[option]).resolve()
+        config = {**base, **config}
     for option in ("data_root", "run_dir"):
         config[option] = (path.parent / config[option]).resolve()
     return config
@@ -75,6 +97,9 @@ def load_config(path):
 
 def build_config(args):
     config = load_config(args.config)
+    task = config.setdefault("task", "fundus")
+    if task not in ("fundus", "polyp"):
+        raise ValueError("task must be fundus or polyp.")
     experiment = config.setdefault("experiment", {})
     experiment.setdefault("device", "auto")
     experiment.setdefault("methods", ["source_only", "tent_continual"])
@@ -89,6 +114,8 @@ def build_config(args):
     config["train"].update({key: value for key, value in (
         ("learning_rate", args.lr), ("batch_size", args.batch_size), ("epochs", args.epochs),
     ) if value is not None})
+    if args.eval_split == "source-test" and not config["train"].get("test_fraction", 0):
+        raise ValueError("Set [train].test_fraction to a positive value to evaluate a source holdout.")
     experiment["device"] = args.device or experiment["device"]
     if args.methods is not None:
         experiment["methods"] = args.methods
@@ -129,6 +156,7 @@ def prepare_data(config, run_dir):
     save_previews(config, run_dir, samples, config["image_size"])
     for (domain, split), n in Counter((row.domain, row.split) for row in samples).items():
         print(f"{domain} {split}: {n}", flush=True)
+    print(f"Target stream: {' -> '.join(config['targets'])}", flush=True)
     print(f"Manifest: {run_dir / 'manifest.csv'}", flush=True)
 
 
@@ -168,7 +196,7 @@ def main(argv=None):
                 raise ValueError(f"CUDA device {args.gpu} is unavailable.")
             device_name = f"cuda:{args.gpu}"
     else:
-        torch.set_num_threads(min(4, torch.get_num_threads()))
+        torch.set_num_threads(config["experiment"].get("cpu_threads", min(4, torch.get_num_threads())))
     device = torch.device(device_name)
     print(f"Using {device} with PyTorch {torch.__version__}", flush=True)
 
@@ -182,7 +210,8 @@ def main(argv=None):
         train(config, run_dir, device, args.smoke, args.epochs, batch_size_override=args.batch_size)
 
     output = run_dir / args.method if args.method and args.method != "both" else run_dir
-    evaluate(config, run_dir, device, args.smoke, methods, output)
+    evaluate(config, run_dir, device, args.smoke, methods, output, checkpoint_path=args.checkpoint,
+             eval_split=args.eval_split or "all")
 
 
 if __name__ == "__main__":
